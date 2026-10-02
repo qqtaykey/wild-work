@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,20 @@ import (
 type Listen struct {
 	Host string `json:"host"`
 	Port int    `json:"port"`
+}
+
+// IsLoopback 是否是「仅本机可访问」的监听地址：环回 IP / localhost / 空主机名
+// （空主机名在 Go 里等同 :port，即全部网卡，但旧配置里 ":7863" 曾被当作本机语义，
+// 这里按「显式写环回才算安全」处理——空主机名一律视为对外暴露）。
+func (l Listen) IsLoopback() bool {
+	h := strings.TrimSpace(strings.ToLower(l.Host))
+	if h == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // Addr 返回 net.Listen 使用的地址串，如 "127.0.0.1:7863" / ":7863"。
@@ -90,6 +105,7 @@ func ParseListen(s string) (Listen, error) {
 type Config struct {
 	Listen    Listen `json:"listen"`
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	AdminPass string `json:"admin_password"` // 空 = 管理面板不鉴权（仅允许监听环回地址时为空）
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 	Region    string `json:"region"`     // 只收 "cn"
@@ -105,16 +121,42 @@ type Config struct {
 		CheckinHours   []int    `json:"checkin_hours,omitempty"` // 旧格式：[9,21]
 		CheckinTimes   []string `json:"checkin_times,omitempty"` // 新格式：["09:00","21:30"]
 		KeepaliveHours []int    `json:"keepalive_hours"`         // [22]
+		// ExpiringThresholdHours 临期阈值（小时）：到期日在此范围内的积分视为「临期」,
+		// Pick() 临期优先消耗。默认 24，下限 24（低于 24 会被钳到 24）。
+		ExpiringThresholdHours int `json:"expiring_threshold_hours,omitempty"`
 	} `json:"schedule"`
 
 	Upstream struct {
 		TimeoutSeconds int `json:"timeout_seconds"` // 默认 120
 	} `json:"upstream"`
 
+	// Compat 三接口兼容层（OpenAI Responses / Anthropic Messages）配置。
+	// 零值即关闭模型名映射，仅接受 "channel/model" 形式。
+	Compat struct {
+		// DefaultChannel 无前缀模型名的傅底渠道，如 "workbuddy"。
+		DefaultChannel string `json:"default_channel"`
+		// ModelMap 裸模型名 → "channel/model"。key 以 * 结尾时按前缀通配匹配。
+		ModelMap map[string]string `json:"model_map"`
+		// MaxTokensCap 转发上游前对 max_tokens 封顶（0 = 不限制）。
+		// Anthropic 客户端常发 64000，而多数上游上限更低，导致直接 400。
+		MaxTokensCap int `json:"max_tokens_cap"`
+	} `json:"compat"`
+
+	// Proxies 单渠道上游代理：key 为渠道 kind（workbuddy/traework/qoder/qodercn/
+	// qodercom/workbuddyai/qwenwork/oczen），value 为代理 URL（http/https/socks5）。
+	// 空串或未列出的渠道直连。主要用途：给 oczen 等有区域限制的渠道走代理。
+	Proxies map[string]string `json:"proxies,omitempty"`
+
+	// OczenAPIKey OpenCodeZen 渠道自定义 API key（sk-...）；空 = 匿名凭证（public）。
+	// 自定义 key 有独立配额（不受匿名通道共享限流），且可调用付费模型（需账户余额）。
+	OczenAPIKey string `json:"oczen_api_key,omitempty"`
+
 	// 解析后
 	HardCreditDur  time.Duration `json:"-"`
 	SoftRateDur    time.Duration `json:"-"`
 	ErrCooldownDur time.Duration `json:"-"`
+	// ExpiringThresholdDur 临期阈值解析结果（normalize 里钳到 >= 24h）。
+	ExpiringThresholdDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -133,7 +175,11 @@ func Default() *Config {
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.CheckinTimes = []string{"09:00", "21:00"}
 	c.Schedule.KeepaliveHours = []int{22}
+	c.Schedule.ExpiringThresholdHours = 24
 	c.Upstream.TimeoutSeconds = 120
+	c.Compat.DefaultChannel = "workbuddy"
+	c.Compat.MaxTokensCap = 32000
+	c.Proxies = map[string]string{}
 	return c
 }
 
@@ -233,6 +279,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WILDWORK_API_KEY"); v != "" {
 		c.APIKey = v
 	}
+	if v := os.Getenv("WILDWORK_ADMIN_PASSWORD"); v != "" {
+		c.AdminPass = v
+	}
 	if v := os.Getenv("WILDWORK_AUTH_DIR"); v != "" {
 		c.AuthDir = v
 	}
@@ -261,6 +310,14 @@ func applyEnv(c *Config) {
 			c.Upstream.TimeoutSeconds = n
 		}
 	}
+	if v := os.Getenv("WILDWORK_DEFAULT_CHANNEL"); v != "" {
+		c.Compat.DefaultChannel = v
+	}
+	if v := os.Getenv("WILDWORK_MAX_TOKENS_CAP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Compat.MaxTokensCap = n
+		}
+	}
 }
 
 func (c *Config) normalize() error {
@@ -280,8 +337,38 @@ func (c *Config) normalize() error {
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
 	}
+	// 临期阈值：默认 24h，下限 24h（日期粒度的到期判定低于一天没有意义）。
+	if c.Schedule.ExpiringThresholdHours <= 0 {
+		c.Schedule.ExpiringThresholdHours = 24
+	}
+	if c.Schedule.ExpiringThresholdHours < 24 {
+		c.Schedule.ExpiringThresholdHours = 24
+	}
+	c.ExpiringThresholdDur = time.Duration(c.Schedule.ExpiringThresholdHours) * time.Hour
+	if c.Compat.MaxTokensCap < 0 {
+		c.Compat.MaxTokensCap = 0 // 负数视为「不限制」，避免误用导致 max_tokens 被置 0
+	}
 	if c.Listen.Port <= 0 {
 		c.Listen.Port = 7863
+	}
+	c.AdminPass = strings.TrimSpace(c.AdminPass)
+	// 代理配置清洗：剔除空值，校验 URL 形态（http/https/socks5）。
+	for k, v := range c.Proxies {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			delete(c.Proxies, k)
+			continue
+		}
+		u, err := url.Parse(v)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("proxies[%s]: 无效代理地址 %q（应为 http://host:port 或 socks5://host:port）", k, v)
+		}
+		switch u.Scheme {
+		case "http", "https", "socks5":
+		default:
+			return fmt.Errorf("proxies[%s]: 不支持的代理协议 %q（仅 http/https/socks5）", k, u.Scheme)
+		}
+		c.Proxies[k] = v
 	}
 	if c.Region == "" {
 		c.Region = "cn"

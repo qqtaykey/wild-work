@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,6 +52,20 @@ func (a *Auth) JWT() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.AccessToken
+}
+
+// AccessTokenValue 锁内快照：出站请求头用，防止与 keepalive 刷新并发读写 token。
+func (a *Auth) AccessTokenValue() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.AccessToken
+}
+
+// RefreshTokenValue 锁内快照：防止调度器锁外直读 RefreshToken 与 refresh 写回竞争。
+func (a *Auth) RefreshTokenValue() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.RefreshToken
 }
 
 // NeedsRefreshLocked 是 NeedsRefresh 的持锁内部版本；调用方必须已持有读/写锁。
@@ -179,7 +194,7 @@ func (a *Auth) saveAtomicLocked() error {
 	if a.FilePath == "" {
 		return fmt.Errorf("no FilePath set")
 	}
-		doc := map[string]any{
+	doc := map[string]any{
 		"auth": map[string]any{
 			"accessToken":  a.AccessToken,
 			"refreshToken": a.RefreshToken,
@@ -234,6 +249,30 @@ func LoadWorkBuddyDir(dir, wantRegion string) ([]*Auth, error) {
 	return out, nil
 }
 
+// LoadWorkBuddyAiDir 扫描 WorkBuddy 国际版凭证（workbuddyai-*.json）。
+// 不按 region 过滤：国际版凭证的 domain 天然为 www.workbuddy.ai，
+// 路由由每个 Auth 自身的 domain 决定，与全局 region 配置无关。
+func LoadWorkBuddyAiDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "workbuddyai-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := Parse(raw)
+		if err != nil {
+			continue
+		}
+		a.Kind, a.FilePath = "workbuddyai", f
+		out = append(out, a)
+	}
+	return out, nil
+}
+
 // LoadTraeDir 扫描 TraeWork 凭证（trae-*.json）。
 func LoadTraeDir(dir string) ([]*Auth, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "trae-*.json"))
@@ -257,8 +296,37 @@ func LoadTraeDir(dir string) ([]*Auth, error) {
 }
 
 // LoadQoderDir 扫描 QoderWork 凭证（qoder-*.json / qoderwork-*.json）。
+// 注意：qodercn-*.json / qodercom-*.json 也被 qoder*.json 的 glob 命中，需排除（各自归独立加载器）。
 func LoadQoderDir(dir string) ([]*Auth, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "qoder*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		// 排除 QoderCN / QoderCOM 渠道的凭证（独立渠道，不混入）
+		base := filepath.Base(f)
+		if strings.HasPrefix(base, "qodercn-") || strings.HasPrefix(base, "qodercom-") {
+			continue
+		}
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := Parse(raw)
+		if err != nil {
+			continue
+		}
+		a.Kind, a.FilePath = "qoder", f
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// LoadQoderCNDir 扫描 QoderCN 凭证（qodercn-*.json，独立渠道）。
+// 注意 glob 边界：qodercn- 前缀不会被 LoadQoderCOMDir（qodercom-*）命中，互不干扰。
+func LoadQoderCNDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "qodercn-*.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -272,8 +340,193 @@ func LoadQoderDir(dir string) ([]*Auth, error) {
 		if err != nil {
 			continue
 		}
-		a.Kind, a.FilePath = "qoder", f
+		a.Kind, a.FilePath = "qodercn", f
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// LoadQoderCOMDir 扫描 QoderCOM 凭证（qodercom-*.json，独立渠道，国际版）。
+func LoadQoderCOMDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "qodercom-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := Parse(raw)
+		if err != nil {
+			continue
+		}
+		a.Kind, a.FilePath = "qodercom", f
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// LoadQwenWorkDir 扫描千问办公凭证（qwenwork-*.json）。
+// 文件名前缀不能与 qoder*.json 冲突（LoadQoderDir 的 glob 会先吞掉 qwenwork- 前缀，
+// 故前缀必须以 q 开头但不含 qoder 字样 —— 取 qwenwork- 无冲突）。
+//
+// 加载后修正 expiresAt：历史版本把 refresh 响应的 expires_in（秒）误当毫秒，
+// 落盘的 expiresAt 比 access token 真实寿命少 ~7 天（实测 607s vs 7 天）。
+// 后果是 NeedsRefresh 几乎恒为真 → 每次请求都刷 token → 与千问办公 App 互踩。
+// access token 的 JWT exp 由上游签名、权威可信，故以其为准原地校正（仅内存，
+// 不写盘：校正后不再触发刷新路径，也就无需回写；token 真过期或刷新后自然落盘正确值）。
+func LoadQwenWorkDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "qwenwork-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := Parse(raw)
+		if err != nil {
+			continue
+		}
+		a.Kind, a.FilePath = "qwenwork", f
+		a.AdoptJWTExpiry()
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// LoadGLMDir 扫描智谱清言凭证（glm-*.json）。
+//
+// 清言凭证的特殊之处：
+//   - 唯一有效凭据是 refresh_token（浏览器 Cookie 里的 chatglm_refresh_token），
+//     access_token 由它换得。用户手填时通常只给 refresh_token，故允许 accessToken 为空
+//     （auth.Parse 要求非空，这里用放宽版解析器）。
+//   - **上游 refresh 不返回 expires_in**（2026-09-26 实测），早期实现把 expiresAt
+//     落成了 0 → NeedsRefresh 恒为真 → 每次请求都刷 token。
+//     故这里调 AdoptJWTExpiry 用 access_token 的 JWT exp 原地自愈（仅内存）。
+//
+// 与 LoadQwenWorkDir 的同款处理（见 R21：expires_in 单位/缺失陷阱）。
+func LoadGLMDir(dir string) ([]*Auth, error) {
+	files, err := filepath.Glob(filepath.Join(dir, "glm-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var out []*Auth
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		a, err := parseAllowMissingAccessToken(raw)
+		if err != nil {
+			continue
+		}
+		a.Kind, a.FilePath = "glm", f
+		// 自愈历史脏值：expiresAt=0（上游不返回 expires_in 所致）会让
+		// NeedsRefresh 恒为真 → 每次请求都刷 token。
+		a.AdoptJWTExpiry()
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// parseAllowMissingAccessToken 与 Parse 相同，但允许 accessToken 为空
+// （仅 glm 渠道使用：其凭据本质是 refresh_token）。
+func parseAllowMissingAccessToken(raw []byte) (*Auth, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("storage_parse_error: %w", err)
+	}
+	var nested struct {
+		Auth struct {
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+			ExpiresAt    int64  `json:"expiresAt"`
+			Domain       string `json:"domain"`
+		} `json:"auth"`
+		Account struct {
+			UID      string `json:"uid"`
+			Nickname string `json:"nickname"`
+		} `json:"account"`
+	}
+	var flat struct {
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresAt    int64  `json:"expiresAt"`
+		UID          string `json:"uid"`
+		Nickname     string `json:"nickname"`
+	}
+	var a Auth
+	if _, isNested := probe["auth"]; isNested {
+		if err := json.Unmarshal(raw, &nested); err != nil {
+			return nil, fmt.Errorf("storage_parse_error: %w", err)
+		}
+		a = Auth{
+			AccessToken:  nested.Auth.AccessToken,
+			RefreshToken: nested.Auth.RefreshToken,
+			ExpiresAt:    nested.Auth.ExpiresAt,
+			Domain:       nested.Auth.Domain,
+			UID:          nested.Account.UID,
+			Nickname:     nested.Account.Nickname,
+		}
+	} else {
+		if err := json.Unmarshal(raw, &flat); err != nil {
+			return nil, fmt.Errorf("storage_parse_error: %w", err)
+		}
+		a = Auth{
+			AccessToken:  flat.AccessToken,
+			RefreshToken: flat.RefreshToken,
+			ExpiresAt:    flat.ExpiresAt,
+			UID:          flat.UID,
+			Nickname:     flat.Nickname,
+		}
+	}
+	// glm 的凭据本体是 refresh_token：只要它非空即可用
+	if strings.TrimSpace(a.RefreshToken) == "" {
+		return nil, fmt.Errorf("parse_error: missing refreshToken")
+	}
+	return &a, nil
+}
+
+// AdoptJWTExpiry 用 access token 的 JWT exp 校正本地 expiresAt（仅当 JWT 更晚时）。
+// 用于修复历史上 expires_in 单位误判造成的偏短 expiresAt（见 LoadQwenWorkDir）。
+// 只在 exp 可解析且确实晚于当前值时才覆盖，避免把正常值改坏。
+func (a *Auth) AdoptJWTExpiry() {
+	exp := jwtExpiry(a.JWT())
+	if exp <= 0 {
+		return
+	}
+	a.Lock()
+	defer a.Unlock()
+	if exp > a.ExpiresAt {
+		a.ExpiresAt = exp
+	}
+}
+
+// jwtExpiry 解出 JWT payload 的 exp（Unix 秒）；非 JWT/无 exp 时返回 0。
+// 不校验签名：用途仅是从本地凭证自身的 payload 读出自报到期时刻。
+func jwtExpiry(token string) int64 {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return 0
+	}
+	p := parts[1]
+	if r := len(p) % 4; r != 0 {
+		p += strings.Repeat("=", 4-r)
+	}
+	raw, err := base64.URLEncoding.DecodeString(p)
+	if err != nil {
+		return 0
+	}
+	var payload struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return 0
+	}
+	return payload.Exp
 }

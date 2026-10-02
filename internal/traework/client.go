@@ -47,23 +47,64 @@ func Classify(status int, body string) provider.ErrKind {
 
 // Client Trae SOLO 上游 HTTP 客户端。
 type Client struct {
-	HTTP              *http.Client
-	StreamHTTP        *http.Client
-	AgentHost         string
-	UgHost            string
-	OAuthHost         string
+	HTTP       *http.Client
+	StreamHTTP *http.Client
+	AgentHost  string
+	UgHost     string
+	OAuthHost  string
+	// PricingHost 定价接口基址；空则回落到 WorkHost。
+	// 单列为字段是为了让测试可指向本地 mock。
+	PricingHost       string
 	ClientID          string
 	CheckinRetryDelay time.Duration // 9074 限流后的重试等待；生产默认 8s
+
+	// Function 对话/模型列表接口的 function 值（solo_work_lite / solo_agent）。
+	Function string
+	// PricingFunctions 定价接口 functions 查询参数（各渠道口径不同）。
+	PricingFunctions string
+	// PricingChannel 定价条目落库的渠道标签（traework / traecode）。
+	PricingChannel string
+	// PricingPrimary 渠道主 function，去重时优先（即对话真实扣费的那一组）。
+	PricingPrimary string
 }
 
 func New() *Client {
 	tr := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 20, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 120 * time.Second}
-	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, ClientID: ClientID, CheckinRetryDelay: 8 * time.Second}
+	return &Client{HTTP: &http.Client{Timeout: 120 * time.Second, Transport: tr}, StreamHTTP: &http.Client{Transport: tr}, AgentHost: AgentHost, UgHost: UgHost, OAuthHost: OAuthHost, PricingHost: WorkHost, ClientID: ClientID, CheckinRetryDelay: 8 * time.Second, Function: Function, PricingFunctions: PricingFunctionsWork, PricingChannel: "traework", PricingPrimary: PricingPrimaryWork}
+}
+
+// NewTraeCode 返回 TraeCode（代码版）专用 Client：function=solo_agent。
+//
+// TraeCode 与 TraeWork 是**同一上游的不同 function**，账号体系相同，
+// 因此二者共用一份凭证（调用方应共享同一个 pool，避免 refresh token 轮换冲突）；
+// 差异只在 function 与定价分组口径。
+func NewTraeCode() *Client {
+	c := New()
+	c.Function = FunctionCode
+	c.PricingFunctions = PricingFunctionsCode
+	c.PricingChannel = "traecode"
+	c.PricingPrimary = PricingPrimaryCode
+	return c
+}
+
+// pricingBase 定价接口基址（未显式设置时回落到 WorkHost）。
+func (c *Client) pricingBase() string {
+	if c.PricingHost != "" {
+		return c.PricingHost
+	}
+	return WorkHost
 }
 
 func (c *Client) agentBase() string { return c.AgentHost }
 func (c *Client) ugBase() string    { return c.UgHost }
 func (c *Client) oauthBase() string { return c.OAuthHost }
+
+// maxJSONBody doJSON 单次响应的读取上限。
+//
+// 上限的意义不是「够不够用」，而是给上游异常返回一个内存上界。目录接口
+// （get_detail_param）在 solo_agent 下实测 1.28MB，而旧上限 1MB 会把 JSON
+// 截成半截、解析失败后静默回退静态兜底表（面板只显示 16 个模型，issue #41）。
+const maxJSONBody = 8 << 20
 
 func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 	resp, err := c.HTTP.Do(req)
@@ -71,10 +112,15 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// 多读 1 字节用于判定是否被截断：读满 maxJSONBody+1 说明上游响应超限，
+	// 此时显式报错——否则半截 JSON 会被 json.Unmarshal 误报成语法错误（issue #41）。
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxJSONBody+1))
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
 		return nil, &provider.Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+	}
+	if len(raw) > maxJSONBody {
+		return nil, fmt.Errorf("traework: response body exceeds %d bytes", maxJSONBody)
 	}
 	return raw, nil
 }
@@ -150,7 +196,7 @@ func normalizeExpiresAt(v int64) int64 {
 }
 
 func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body)))
+	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body, c.Function)))
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -178,7 +224,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 	// traework 上游 llm_utils_chat 强制 stream=true（见 PrepareBody），
 	// 所有模型均为流式模式；非流式请求由本地 Aggregate() 缓冲 SSE 后聚合。
 	// mode_type=nil 返回全部配置，按 config_name 去重避免流式/非流式重复。
-	body := map[string]any{"function": Function, "config_names": nil, "need_prompt": false, "current_config_info": nil, "poly_prompt": true, "mode_type": nil, "agent_type": nil}
+	body := map[string]any{"function": c.Function, "config_names": nil, "need_prompt": false, "current_config_info": nil, "poly_prompt": true, "mode_type": nil, "agent_type": nil}
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpModels, bytes.NewReader(raw))
 	if err != nil {
@@ -227,7 +273,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]provider.ModelInfo, error) {
 // FetchModelPricing 从 /api/remote/v1/models 拉取模型积分倍率。
 // 按 config_name 去重，解析 features.consumption_rate.rate。
 func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error) {
-	url := WorkHost + EpModelsPricing + "?functions=solo_agent_remote,solo_work_remote,solo_design_remote&show_custom_model=true"
+	url := c.pricingBase() + EpModelsPricing + "?functions=" + c.PricingFunctions + "&show_custom_model=true"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -267,25 +313,29 @@ func (c *Client) FetchModelPricing(a *auth.Auth) ([]provider.ModelPricing, error
 	if env.Code != 0 {
 		return nil, fmt.Errorf("trae pricing api code=%d", env.Code)
 	}
-	// 按 name 去重：同一模型可能出现在多个 function 下，倍率一致
-	seen := map[string]bool{}
-	out := make([]provider.ModelPricing, 0)
+	// 去重：同一模型可能出现在多个 function 分组下，且**倍率未必一致**
+	// （实测豆包 Seed-2.1-Pro：solo_agent=0.08 / _remote=0.8）。
+	// 对话按主 function 计费，故主 function 的结果优先，非主 function 仅作兜底。
+	byName := make(map[string]provider.ModelPricing)
 	for _, fn := range env.Data.List {
+		isPrimary := c.PricingPrimary != "" && fn.Function == c.PricingPrimary
 		for _, m := range fn.Models {
-			if seen[m.Name] {
-				continue
-			}
-			seen[m.Name] = true
 			rate := parseTraeFeatures(m.Features)
 			if rate <= 0 {
 				continue
 			}
-			out = append(out, provider.ModelPricing{
-				Model:   m.Name,
-				Channel: "traework",
-				Rate:    rate,
-			})
+			if _, seen := byName[m.Name]; !seen || isPrimary {
+				byName[m.Name] = provider.ModelPricing{
+					Model:   m.Name,
+					Channel: c.PricingChannel,
+					Rate:    rate,
+				}
+			}
 		}
+	}
+	out := make([]provider.ModelPricing, 0, len(byName))
+	for _, p := range byName {
+		out = append(out, p)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("trae pricing api returned empty")
@@ -459,82 +509,120 @@ func checkinResponseMessage(message, msg string) string {
 	return strings.TrimSpace(msg)
 }
 
+// UserResource 查询账号当前可花费积分余额（= UserEntUsage 的可消耗口径，仅 ep=0 池）。
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) { return c.UserEntUsage(a) }
 
+// UserEntUsage 查询可消耗余额（pool 路由依据）。
+// 内部走 fetchEntUsage：只累加 available_endpoint==0 的包，ep=1 官方客户端专用池不计入。
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
-	// 网页版 web_user_ent_usage：require_usage=true 返回每个包的 usage.credits_amount（实际用量），
-	// 剩余 = Σ(credits_limit - credits_amount)。
+	// 网页版 web_user_ent_usage：require_usage=true 返回每个包的 usage.credits_amount（实际用量）。
+	_, remain, err = c.fetchEntUsage(a)
+	return remain, err
+}
+
+// entPackage 上游权益包条目（UserEntUsage / UserResourceDetail 共用结构）。
+type entPackage struct {
+	EntitlementBaseInfo struct {
+		// AvailableEndpoint 可用端点：0=通用池，1=官方客户端专用池。
+		// 2026-09-23 起上游不再下发 ep=1（专用池也标成 0），该字段仅作历史兜底。
+		AvailableEndpoint int `json:"available_endpoint"`
+		// ProductID 商品 ID：209=200 档每日签到（官方客户端专用，本工具扣不到），
+		// 208=150 档每日签到（通用）、221=每月登录（通用）。这是当前唯一能区分
+		// 「专用/通用」的稳定判据（2026-09-23 三账号实测：209 的 used 恒为 0）。
+		ProductID int `json:"product_id"`
+		Quota     struct {
+			CreditsLimit float64 `json:"credits_limit"`
+		} `json:"quota"`
+		// EntitlementID 条目唯一标识（如 "340864129538"/"checkin_20260817_..."），ledger 差分对账用。
+		EntitlementID string `json:"entitlement_id"`
+		PackageName   string `json:"package_name"`
+		PackageType   string `json:"package_type"`
+	} `json:"entitlement_base_info"`
+	DisplayDesc string `json:"display_desc"`
+	GroupName   string `json:"group_name"`
+	GroupType   int    `json:"group_type"`
+	// ExpireTime 到期 Unix 秒；上游对无到期条目下发 0。
+	ExpireTime int64 `json:"expire_time"`
+	Usage      struct {
+		CreditsAmount float64 `json:"credits_amount"`
+	} `json:"usage"`
+}
+
+// usable 判定该包是否属于本工具可消耗的额度池。
+//
+// 判据（2026-09-26 更新，issue #44）：只有 available_endpoint==1（上游显式声明的
+// 专用端点池）不可用，其余一律可消耗。
+//
+// 历史沿革：
+//   - 2026-09-18：专用池下发 ep=1，判据 = ep==0；
+//   - 2026-09-23（f6f41a4）：上游不再下发 ep=1，改判 pid==209；
+//   - 2026-09-26（issue #44）：pid==209 判据被证伪——pid=209 是「200 档每日签到」，
+//     上游已把它升级为通用积分。本仓自有日志铁证：2026-09-23 15:20–16:10 该账号
+//     连发 99 次对话，期间 remain（208/221 池）纹丝不动停在 3086，而「不可用」小计
+//     从 2200 降到 1846（-354，正是那 99 次对话的消耗量）——
+//     即**扣费实际就发生在这个被判为不可用的池上**。把它排除只会让
+//     pool 按虚低的余额选号、面板把真实可用的积分标成「不可用」。
+//     故撤回 pid==209 判据，仅保留 ep==1 作历史兜底（上游若重新显式声明则仍尊重）。
+func (p entPackage) usable() bool {
+	return p.EntitlementBaseInfo.AvailableEndpoint != 1
+}
+
+// fetchEntUsage 调用上游积分接口，返回全部条目 + 可消耗余额（仅 usable() 判定为可用的包）。
+// 不可消耗余额由调用方对条目按 Usable 标记汇总（provider.Summarize），本函数不重复算。
+//
+// 可用性判据见 entPackage.usable：仅 available_endpoint==1 不可用（issue #44）。
+// 早期实现用 group_type!=1 判定，会把「用户福利」等误计入；后改为
+// available_endpoint==0，2026-09-23 起该字段也失效（专用池被标成 0），
+// 一度改用 product_id==209，2026-09-26 证伪后撤回（详见 usable 注释）。
+func (c *Client) fetchEntUsage(a *auth.Auth) ([]entPackage, int64, error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte(`{"require_usage":true}`)))
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	UgHeaders(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
 	var resp struct {
-		UserEntitlementPackList []struct {
-			EntitlementBaseInfo struct {
-				Quota struct {
-					CreditsLimit float64 `json:"credits_limit"`
-				} `json:"quota"`
-			} `json:"entitlement_base_info"`
-			Usage struct {
-				CreditsAmount float64 `json:"credits_amount"`
-			} `json:"usage"`
-		} `json:"user_entitlement_pack_list"`
+		UserEntitlementPackList []entPackage `json:"user_entitlement_pack_list"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, fmt.Errorf("ent usage parse: %w", err)
+		return nil, 0, fmt.Errorf("ent usage parse: %w", err)
 	}
-	remainF := 0.0
+	var usable int64
 	for _, p := range resp.UserEntitlementPackList {
-		remainF += p.EntitlementBaseInfo.Quota.CreditsLimit - p.Usage.CreditsAmount
+		if p.usable() {
+			usable += packRemain(p)
+		}
 	}
-	return int64(remainF), nil
+	return resp.UserEntitlementPackList, usable, nil
+}
+
+// packRemain 单个权益包的剩余额度（limit - used，负值钳 0）。
+func packRemain(p entPackage) int64 {
+	limit := int64(p.EntitlementBaseInfo.Quota.CreditsLimit)
+	used := int64(p.Usage.CreditsAmount)
+	if remain := limit - used; remain > 0 {
+		return remain
+	}
+	return 0
 }
 
 // UserResourceDetail 查询 TraeWork 积分明细（每个套餐条目）。
+// 返回的 remain 为可消耗余额（pool 路由依据），items 包含全部条目。
+// 每个条目带 expire_at（到期日）与 usable（是否属于本工具可消耗的 ep=0 池）。
 func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceItem, error) {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte(`{"require_usage":true}`)))
+	packs, usable, err := c.fetchEntUsage(a)
 	if err != nil {
 		return 0, nil, err
 	}
-	UgHeaders(req, a)
-	data, err := c.doJSON(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	var resp struct {
-		UserEntitlementPackList []struct {
-			EntitlementBaseInfo struct {
-				Quota struct {
-					CreditsLimit float64 `json:"credits_limit"`
-				}
-				PackageName   string `json:"package_name"`
-				PackageType   string `json:"package_type"`
-			} `json:"entitlement_base_info"`
-			DisplayDesc   string `json:"display_desc"`
-			GroupName     string `json:"group_name"`
-			GroupType     int    `json:"group_type"`
-			Usage struct {
-				CreditsAmount float64 `json:"credits_amount"`
-			} `json:"usage"`
-		} `json:"user_entitlement_pack_list"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, nil, fmt.Errorf("ent usage parse: %w", err)
-	}
-	var total int64
-	items := make([]provider.ResourceItem, 0, len(resp.UserEntitlementPackList))
-	for _, p := range resp.UserEntitlementPackList {
-		limit := int64(p.EntitlementBaseInfo.Quota.CreditsLimit)
-		used := int64(p.Usage.CreditsAmount)
-		remain := limit - used
-		if remain < 0 { remain = 0 }
-		total += remain
-		// 优先使用 group_name（如"每日签到"、"每月登录积分"），其次 display_desc，最后兜底
+	items := make([]provider.ResourceItem, 0, len(packs))
+	for _, p := range packs {
+		// 零额度条目（如免费的 0 限额包）不展示：既无信息量，又会把列表搅得很长。
+		if p.EntitlementBaseInfo.Quota.CreditsLimit <= 0 {
+			continue
+		}
 		name := p.GroupName
 		if name == "" {
 			name = p.DisplayDesc
@@ -549,13 +637,25 @@ func (c *Client) UserResourceDetail(a *auth.Auth) (int64, []provider.ResourceIte
 			name = fmt.Sprintf("套餐 (group_type=%d)", p.GroupType)
 		}
 		items = append(items, provider.ResourceItem{
-			Name:   name,
-			Total:  limit,
-			Used:   used,
-			Remain: remain,
+			Name:     name,
+			Total:    int64(p.EntitlementBaseInfo.Quota.CreditsLimit),
+			Used:     int64(p.Usage.CreditsAmount),
+			Remain:   packRemain(p),
+			ExpireAt: unixDate(p.ExpireTime),
+			// entitlement_id 是上游稳定标识，供 ledger 差分对账（过期/消耗归因）
+			Key:    p.EntitlementBaseInfo.EntitlementID,
+			Usable: p.usable(),
 		})
 	}
-	return total, items, nil
+	return usable, items, nil
+}
+
+// unixDate 把上游 Unix 秒转为 UTC+8 的 YYYY-MM-DD；0/负值（上游未下发到期时间）返回空串。
+func unixDate(sec int64) string {
+	if sec <= 0 {
+		return ""
+	}
+	return time.Unix(sec, 0).In(softRateResetLoc).Format("2006-01-02")
 }
 
 func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, err error) {
@@ -589,8 +689,12 @@ func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, 
 }
 
 func (c *Client) Classify(status int, body string) provider.ErrKind { return Classify(status, body) }
-func (c *Client) Stream(w http.ResponseWriter, r io.Reader) error   { return Stream(w, r) }
-func (c *Client) Aggregate(r io.Reader) (map[string]any, error)     { return Aggregate(r) }
+func (c *Client) Stream(w http.ResponseWriter, r io.Reader, model string) (map[string]any, error) {
+	return StreamWithModel(w, r, model)
+}
+func (c *Client) Aggregate(r io.Reader, model string) (map[string]any, error) {
+	return AggregateWithModel(r, model)
+}
 
 func truncate(s string, n int) string {
 	s = strings.TrimSpace(s)

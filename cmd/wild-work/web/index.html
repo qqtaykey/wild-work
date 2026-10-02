@@ -21,63 +21,101 @@
     <div class="top-info">
       <div class="info-cell">
         <span class="info-label">OpenAI接口</span>
-        <code class="info-value" id="apiAddr" title="点击复制地址"><span class="val"></span></code>
-        <span class="icon-edit" title="修改">✎</span>
+        <code class="info-value" id="apiAddr" title="点击复制地址；进入设置修改"><span class="val"></span></code>
       </div>
       <div class="info-cell">
         <span class="info-label">API-Key</span>
-        <code class="info-value" id="apiKeyDisplay" title="点击复制密钥"><span class="val"></span></code>
-        <span class="icon-edit" title="修改">✎</span>
+        <code class="info-value" id="apiKeyDisplay" title="点击复制密钥；进入设置修改"><span class="val"></span></code>
       </div>
     </div>
     <div class="top-icons">
+      <span class="icon-link gear" id="btnSettings" title="设置">⚙</span>
       <span class="icon-link" id="btnHelp" title="帮助">?</span>
       <span class="icon-link" id="btnAbout" title="关于">i</span>
     </div>
   </header>
 
-  <!-- 账号管理 -->
+  <!-- 主面板：账号管理 / 用量与流水 双 Tab -->
   <section class="panel">
+    <div class="main-tabs">
+      <button class="mtab active" data-mtab="accounts">账号管理</button>
+      <button class="mtab" data-mtab="usage">用量与流水 <span class="ver" id="usageSince"></span></button>
+    </div>
+
+    <!-- ===== Tab: 账号管理 ===== -->
+    <div class="mtab-body" id="mtabAccounts">
     <div class="panel-head">
-      <h2>账号管理</h2>
-      <div class="panel-actions">
-        <button class="btn primary" id="btnRefreshAll">刷新积分</button>
-        <button class="btn" id="btnCheckinAll">全部签到</button>
-        <button class="btn primary" id="btnAddWB">＋ WorkBuddy</button>
-        <button class="btn primary alt" id="btnAddTrae">＋ TraeWork</button>
-        <button class="btn primary alt qoder" id="btnAddQoder">＋ Qoder</button>
+      <div class="panel-actions-wrap">
+        <!-- 左组：刷新积分/全部签到，整体靠左 -->
+        <div class="pa-group pa-left">
+          <button class="btn primary" id="btnRefreshAll">刷新积分</button>
+          <button class="btn" id="btnCheckinAll">全部签到</button>
+        </div>
+        <!-- 中间弹性空白由 flex:1 撑开 -->
+        <div class="pa-spacer"></div>
+        <!-- 右组：渠道添加三列 grid，整体靠右；保持两行，第4列留白（体验渠道不占主位） -->
+        <!-- 布局：行1 = WorkBuddyCN | QoderCN | TraeWork | 智谱清言(体验)；行2 = WorkBuddyAI | QoderCOM | 千问办公 | 留空 -->
+        <!-- 旧 Qoder 渠道已下线（代码保留，仅删界面入口） -->
+        <div class="pa-group pa-right">
+          <button class="btn primary" id="btnAddWB" style="grid-column:1;grid-row:1">＋ WorkBuddyCN</button>
+          <button class="btn primary alt qodercn" id="btnAddQoderCN" style="grid-column:2;grid-row:1">＋ QoderCN</button>
+          <button class="btn primary alt" id="btnAddTrae" style="grid-column:3;grid-row:1">＋ TraeWork</button>
+          <button class="btn primary alt glm" id="btnAddGLM" style="grid-column:4;grid-row:1" title="体验渠道：仅文本对话，不支持工具调用/多模态">＋ 智谱清言</button>
+          <button class="btn primary alt wbai" id="btnAddWBAI" style="grid-column:1;grid-row:2">＋ WorkBuddyAI</button>
+          <button class="btn primary alt qodercom" id="btnAddQoderCOM" style="grid-column:2;grid-row:2">＋ QoderCOM</button>
+          <button class="btn primary alt qwenwork" id="btnAddQwen" style="grid-column:3;grid-row:2">＋ 千问办公</button>
+        </div>
       </div>
     </div>
     <div id="acctList" class="acct-grid"></div>
     <div id="acctEmpty" class="empty hidden">还没有账号，点击上方按钮添加</div>
-  </section>
+    </div>
 
-  <!-- 自动签到 + 开机自启 -->
-  <section class="panel">
-    <div class="panel-head"><h2>自动签到</h2></div>
-    <div class="config-grid">
-      <div class="config-left">
-        <div class="row wrap">
-          <div id="timesBox" class="times"></div>
-          <button class="icon-btn" id="btnAddTime" title="增加一个签到时间">＋</button>
+    <!-- ===== Tab: 用量与流水 ===== -->
+    <div class="mtab-body hidden" id="mtabUsage">
+    <div class="panel-head">
+      <div class="pa-group">
+        <div class="seg" id="usageRange">
+          <button class="seg-btn" data-days="1">今日</button>
+          <button class="seg-btn active" data-days="7">7日</button>
         </div>
-        <div class="hint">保活 22:00 自动 · 下次 <span id="nextCheckin">-</span></div>
+        <button class="btn small" id="btnRefreshUsage">刷新</button>
       </div>
-      <div class="config-right">
-        <div class="row">
-          <span>开机自启</span>
-          <label class="switch"><input type="checkbox" id="chkAutostart"><span class="slider"></span></label>
-        </div>
-        <div class="hint">程序随系统启动自动运行</div>
+    </div>
+    <div class="usage-cards">
+      <div class="ucard"><div class="ucard-label">Token 总量</div><div class="ucard-value" id="ucTokens">—</div></div>
+      <div class="ucard"><div class="ucard-label">请求数</div><div class="ucard-value" id="ucReqs">—</div></div>
+      <div class="ucard"><div class="ucard-label">积分消耗</div><div class="ucard-value warn" id="ucSpend">—</div></div>
+      <div class="ucard"><div class="ucard-label">积分入项</div><div class="ucard-value ok" id="ucEarn">—</div></div>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="token">Token 用量</button>
+      <button class="tab" data-tab="credit">积分流水</button>
+    </div>
+    <div class="tab-body" id="tabToken">
+      <div id="usageChart" class="chart-box">图表库加载中…</div>
+      <table class="table" id="tblModels">
+        <thead><tr><th>模型</th><th>渠道</th><th class="num">请求数</th><th class="num">Token</th><th class="num">日均</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="tab-body hidden" id="tabCredit">
+      <div id="creditChart" class="chart-box">图表库加载中…</div>
+      <div class="pager" id="recentPager">
+        <button class="btn small" id="pgPrev">‹ 上一页</button>
+        <span class="pg-info" id="pgInfo">- / -</span>
+        <button class="btn small" id="pgNext">下一页 ›</button>
       </div>
+      <div id="recentList" class="recent"></div>
+    </div>
     </div>
   </section>
 
-  <!-- 渠道费率 -->
+  <!-- 模型列表和费率 -->
   <section class="panel">
     <div class="panel-head">
-      <h2>渠道费率</h2>
-      <button class="btn small" id="btnRefreshFees">刷新费率</button>
+      <h2>模型列表和费率</h2>
+      <button class="btn small" id="btnRefreshFees">刷新</button>
     </div>
     <div id="feesBox" class="fees"></div>
   </section>
@@ -113,6 +151,64 @@
   </div>
 </div>
 
+<!-- 智谱清言登录弹层（自动捕获 Cookie；手工粘贴为兜底） -->
+<div class="overlay hidden" id="glmOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title">添加 智谱清言 账号</div>
+    <div class="modal-body settings-body">
+
+      <!-- 风险与能力边界告知：本渠道为体验性质，务必先读 -->
+      <div class="glm-warn">
+        <div class="glm-warn-title">⚠️ 使用前必读（体验渠道）</div>
+        <ol>
+          <li><b>本渠道仅供体验</b>，不作为日常主力渠道。</li>
+          <li><b>WEB 逆向渠道一旦改版很容易触发风控导致封号</b>，请用小号，勿用主力账号。</li>
+          <li><b>仅能文本对话</b>：不支持工具调用（tool_calls）、不支持多模态（图片输入）；
+              对话不复用上游会话，每次对话在您的清言账号中留痕且<b>不会自动删除</b>；
+              因此<b>不建议通过 Agent（Claude Code/Codex 等）使用</b>。</li>
+        </ol>
+      </div>
+
+      <!-- 自动路径 -->
+      <div class="cfg-section" id="glmAuto">
+        <div class="cfg-heading">自动登录</div>
+        <ol class="glm-steps">
+          <li>已为你打开一个**独立的浏览器窗口**（不影响你日常浏览器的登录态）。</li>
+          <li>在那个窗口里正常登录智谱清言（扫码 / 手机号 / 微信均可）。</li>
+          <li>登录完成后**无需任何操作**，这里会自动捕获凭据并添加账号。</li>
+        </ol>
+        <div class="hint" id="glmStatus">正在启动浏览器…</div>
+        <div class="hint">每个账号使用独立的浏览器环境，所以可以连续添加多个清言账号，互不干扰。</div>
+      </div>
+
+      <!-- 手工兜底 -->
+      <div class="cfg-section">
+        <div class="cfg-heading">
+          <span class="btn small" id="btnGLMToggleManual" style="cursor:pointer">手工方式（自动失败时用）</span>
+        </div>
+        <div id="glmManual" class="hidden">
+          <ol class="glm-steps">
+            <li>在自己浏览器打开 <a href="https://chatglm.cn" target="_blank" rel="noopener noreferrer">chatglm.cn</a> 并登录。</li>
+            <li>按 <code>F12</code> → <code>Application</code> → <code>Cookies</code> → <code>https://chatglm.cn</code>。</li>
+            <li>复制 <code>chatglm_refresh_token</code> 的值，粘贴到下面。</li>
+          </ol>
+          <input id="glmTokenInput" class="input grow" spellcheck="false"
+                 placeholder="粘贴 chatglm_refresh_token 的值" autocomplete="off">
+          <div class="hint" style="margin-top:6px">
+            <button class="btn small primary" id="btnGLMSubmit">验证并添加</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="hint" id="glmErr" style="color:var(--danger)"></div>
+      <div class="hint">凭据只保存在本机 <code>auths/</code> 目录，不会外传。token 会随刷新自动轮换并回写。</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small" id="btnGLMCancel">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- 确认弹层 -->
 <div class="overlay hidden" id="confirmOverlay">
   <div class="modal">
@@ -125,57 +221,164 @@
   </div>
 </div>
 
-<!-- API 配置弹层 -->
-<div class="overlay hidden" id="apiConfigOverlay">
-  <div class="modal">
-    <div class="modal-title">API 配置</div>
-    <div class="modal-body">
-      <div class="row">
-        <label class="lbl">监听</label>
-        <select id="selHost" class="select">
-          <option value="127.0.0.1">127.0.0.1（本机）</option>
-          <option value="0.0.0.0">0.0.0.0（全部）</option>
-          <option value="__custom__">自定义…</option>
-        </select>
-        <span class="muted">:</span>
-        <input id="inPort" class="input port" type="number" min="1" max="65535">
+<!-- 设置弹层（统一配置入口：监听/API-Key/模型路由/渠道代理） -->
+<div class="overlay hidden" id="settingsOverlay">
+  <div class="modal modal-wide">
+    <div class="modal-title">设置</div>
+    <div class="modal-body settings-body">
+
+      <!-- 接口与鉴权 -->
+      <div class="cfg-section">
+        <div class="cfg-heading">接口与鉴权</div>
+        <div class="row">
+          <label class="lbl wide">监听</label>
+          <select id="selHost" class="select">
+            <option value="127.0.0.1">127.0.0.1（本机）</option>
+            <option value="0.0.0.0">0.0.0.0（全部）</option>
+            <option value="__custom__">自定义…</option>
+          </select>
+          <span class="muted">:</span>
+          <input id="inPort" class="input port" type="number" min="1" max="65535">
+        </div>
+        <div id="customHostRow" class="row hidden"><input id="inHost" class="input grow" placeholder="如 192.168.1.100" spellcheck="false"></div>
+        <div class="row">
+          <label class="lbl wide">API-Key</label>
+          <input id="keyInput" class="input grow" spellcheck="false" placeholder="留空 = 不鉴权">
+        </div>
+        <div class="row">
+          <label class="lbl wide" title="面板登录口令（与给 AI 客户端用的 API-Key 是两套）">管理密码<span id="adminPassReq" class="req hidden" title="监听非本机地址时必填">*</span></label>
+          <input id="adminPassInput" class="input grow" type="password" spellcheck="false" placeholder="留空 = 面板不鉴权（仅本机监听时允许）" autocomplete="new-password">
+        </div>
+        <div class="row" style="align-items:center">
+          <label class="lbl wide"></label>
+          <button class="btn small" id="btnAdminLogout">退出登录</button>
+          <button class="btn small" id="btnClearAdminPass" title="关闭面板鉴权（仅监听 127.0.0.1 时允许）">清除密码</button>
+          <span class="hint" style="margin-left:8px">改密码后所有已登录会话立即失效</span>
+        </div>
+        <div id="listenRiskTip" class="risk-tip hidden">⚠️ 监听 0.0.0.0 时必须设置管理密码，否则局域网内任何设备都可访问本 API 与账号管理。</div>
       </div>
-      <div id="customHostRow" class="row hidden"><input id="inHost" class="input grow" placeholder="如 192.168.1.100" spellcheck="false"></div>
-      <div class="risk-tip">⚠️ 监听 0.0.0.0 时，局域网内任何设备都可访问本 API 与账号管理，风险请自行评估。</div>
+
+      <!-- 模型路由（cc/codex 映射） -->
+      <div class="cfg-section">
+        <div class="cfg-heading">模型路由（Claude Code / Codex 映射）</div>
+        <div class="row">
+          <label class="lbl wide">默认渠道</label>
+          <select id="selCh" class="select"></select>
+        </div>
+        <div class="row">
+          <label class="lbl wide">封顶 tokens</label>
+          <input id="inMaxTok" class="input port" type="number" min="0" step="1000">
+          <span class="hint" style="margin-left:6px">0=不限制</span>
+        </div>
+        <div class="row" style="align-items:center">
+          <label class="lbl wide">映射表</label>
+          <span class="btn small" id="btnCompatMap">编辑</span>
+          <span class="hint" id="mapSummary" style="margin-left:6px"></span>
+        </div>
+        <div id="mapEditor" class="map-editor hidden">
+          <div class="hint" style="margin-bottom:4px">一行一条，格式：<code>客户端模型名 = 渠道/模型名</code>；支持通配 <code>claude-* = workbuddy/glm-5.2</code>；以 # 开头为注释。</div>
+          <textarea id="mapText" class="input map-text" spellcheck="false" rows="6"></textarea>
+          <div class="hint" style="margin-top:5px">
+            缺省建议（点击插入）：<span id="mapPresets"></span>
+          </div>
+          <div class="hint" id="mapErr" style="color:var(--danger);margin-top:4px"></div>
+        </div>
+      </div>
+
+      <!-- 自动签到与开机自启 -->
+      <div class="cfg-section">
+        <div class="cfg-heading">自动签到与开机自启</div>
+        <div class="row">
+          <label class="lbl wide">签到时间</label>
+          <div id="timesBox" class="times"></div>
+          <button class="icon-btn" id="btnAddTime" title="增加一个签到时间">＋</button>
+        </div>
+        <div class="hint">保活 22:00 自动 · 下次 <span id="nextCheckin">-</span></div>
+        <div class="row" style="margin-top:8px">
+          <label class="lbl wide" title="到期日在此范围内的积分视为临期，调度器优先消耗，减少到期作废">临期阈值</label>
+          <select id="selExpiring" class="input" style="width:100px">
+            <option value="1">1 天</option>
+            <option value="2">2 天</option>
+            <option value="3">3 天</option>
+          </select>
+          <span class="hint" style="margin-left:8px">该范围内到期的积分优先消耗</span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="lbl wide">开机自启</label>
+          <label class="switch"><input type="checkbox" id="chkAutostart"><span class="slider"></span></label>
+          <span class="hint" style="margin-left:8px">程序随系统启动自动运行</span>
+        </div>
+      </div>
+
+      <!-- 单渠道上游代理 -->
+      <div class="cfg-section">
+        <div class="cfg-heading">渠道上游代理</div>
+        <div class="hint" style="margin:0 0 8px">给指定渠道的上游请求单独配置代理（http/https/socks5），留空 = 直连。典型用途：OpenCodeZen 的区域限制模型需要经代理访问。</div>
+        <div class="hint" style="margin:0 0 8px">OC Zen Key 留空 = 匿名凭证；填入 sk-… 自定义 key 可解锁独立配额与付费模型。</div>
+        <div id="proxyList" class="proxy-list"></div>
+        <div class="row" style="margin-top:8px">
+          <label class="lbl wide" title="OpenCodeZen 自定义 API key">OC Zen Key</label>
+          <input id="oczenKeyInput" class="input grow" spellcheck="false" placeholder="留空 = 匿名凭证 public（sk-… 可解锁独立配额/付费模型）">
+          <button class="btn small" id="btnOczenTest">测试</button>
+        </div>
+        <div class="hint" id="proxyErr" style="color:var(--danger)"></div>
+      </div>
+
     </div>
     <div class="modal-actions">
-      <button class="btn small" id="btnApiCancel">取消</button>
-      <button class="btn small primary" id="btnApiSave">保存</button>
+      <button class="btn small" id="btnSettingsCancel">取消</button>
+      <button class="btn small primary" id="btnSettingsSave">保存</button>
     </div>
   </div>
 </div>
 
-<!-- API Key 弹层 -->
-<div class="overlay hidden" id="apiKeyOverlay">
+<!-- 显示名修改弹层 -->
+<div class="overlay hidden" id="renameOverlay">
   <div class="modal">
-    <div class="modal-title">修改 API-Key</div>
+    <div class="modal-title">修改显示名</div>
     <div class="modal-body">
-      <input id="keyInput" class="input grow" style="width:100%" spellcheck="false" placeholder="留空 = 不鉴权">
+      <div class="hint" style="margin:0 0 6px">账号：<span id="rnUid" style="font-family:ui-monospace,monospace"></span></div>
+      <input id="rnInput" class="input grow" style="width:100%" spellcheck="false" maxlength="60" placeholder="输入新的显示名（1-60 字符）">
     </div>
     <div class="modal-actions">
-      <button class="btn small" id="btnKeyCancel">取消</button>
-      <button class="btn small primary" id="btnKeySave">保存</button>
+      <button class="btn small" id="btnRenameCancel">取消</button>
+      <button class="btn small primary" id="btnRenameSave">保存</button>
     </div>
   </div>
 </div>
 
 <!-- 帮助弹层 -->
 <div class="overlay hidden" id="helpOverlay">
-  <div class="modal" style="max-width:540px">
+  <div class="modal modal-wide">
     <div class="modal-title">配置说明</div>
     <div class="modal-body docs">
-      <p>1. 添加账号后自动完成登录（Qoder 渠道当前无签到活动，仅 API 转发）。</p>
+      <p>1. 添加账号后自动完成登录（WorkBuddy 国际版无需手动签到，定时自动领取日活奖励；Qoder 渠道无签到活动，仅 API 转发）。</p>
       <p>2. AI 客户端配置：Base URL <code>http://127.0.0.1:7863/v1</code>，API Key 见页面顶部。</p>
-      <p>3. 模型 ID 需带渠道前缀：<code>workbuddy/&lt;model&gt;</code>、<code>traework/&lt;model&gt;</code>、<code>qoder/&lt;model&gt;</code>。</p>
-      <p>4. 积分会随聊天消耗实时变化，"全部刷新积分"可即时获取最新余额。</p>
-      <p>5. 日志文件位于 exe 目录下 <code>data/app.log</code>，可从托盘菜单"查看日志"打开。</p>
-      <p>6. 退出程序：右键托盘图标选择"退出"。</p>
-      <p>7. 本工具仅供个人学习使用，请遵守各上游平台服务条款。</p>
+      <p>3. 支持三种接口协议：<br>
+        · OpenAI Chat：<code>POST /v1/chat/completions</code>（旧版客户端）<br>
+        · OpenAI Responses：<code>POST /v1/responses</code>（codex CLI）<br>
+        · Anthropic Messages：<code>POST /v1/messages</code>（claude CLI，Base URL 不带 <code>/v1</code>）<br>
+        Anthropic 客户端用 <code>x-api-key</code> 或 <code>Authorization: Bearer</code> 均可。</p>
+      <p>4. 模型 ID 建议带渠道前缀：<code>workbuddy/&lt;model&gt;</code>、<code>workbuddyai/&lt;model&gt;</code>、<code>traework/&lt;model&gt;</code>、<code>qoder/&lt;model&gt;</code>；
+        也支持裸名（走「设置 → 模型路由」的 <code>默认渠道</code> / <code>映射表</code> 配置）。</p>
+      <p>5. 账号显示名可点击卡片上的名字直接修改；顶栏齿轮进入统一设置（监听 / API-Key / 模型路由 / 渠道上游代理）。</p>
+      <p>6. 渠道上游代理：给单个渠道的上游请求配置独立代理（http/https/socks5），留空即直连；
+        OpenCodeZen 的区域限制模型需经代理访问时可在此配置。</p>
+      <p>7. 积分会随聊天消耗实时变化，"全部刷新积分"可即时获取最新余额。</p>
+      <p>8. 日志文件位于 exe 目录下 <code>data/app.log</code>，可从托盘菜单"查看日志"打开。</p>
+      <p>9. 退出程序：右键托盘图标选择"退出"。</p>
+      <div class="risk-block">
+        <div class="risk-title">⚠️ 风险警告与免责声明</div>
+        <ul class="risk-list">
+          <li>本工具基于对上游平台接口的<b>逆向工程</b>实现，非官方支持，随时可能因上游改版而失效。</li>
+          <li>使用本工具可能<b>违反上游平台的服务条款</b>，存在<b>账号被限制、封禁或追责的风险</b>，请自行评估并承担全部后果。</li>
+          <li>请使用小号或可承受损失的账号接入，<b>切勿将主力账号用于本工具</b>。</li>
+          <li>本工具仅限<b>个人学习与研究</b>用途，严禁用于商业用途或大规模滥用；请遵守各上游平台服务条款与当地法律法规。</li>
+          <li>监听 <code>0.0.0.0</code> 会将 API 与账号管理暴露给局域网，<strong>必须配置管理密码</strong>（面板登录用，与 API-Key 是两套凭据）；请确认网络环境可信。</li>
+          <li>本软件按"现状"提供，作者不对使用本软件造成的任何直接或间接损失（含账号损失、积分损失、数据丢失等）承担责任。</li>
+          <li>本软件与上游各平台（WorkBuddy/CodeBuddy、TraeWork、Qoder、千问办公、OpenCode 等）无任何关联，商标权归其各自所有者。</li>
+        </ul>
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn small primary" id="btnHelpClose">知道了</button>
@@ -202,6 +405,22 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<!-- 管理面板登录层（开启管理密码时；未登录状态下覆盖全部内容） -->
+<div class="overlay hidden" id="adminLoginOverlay">
+  <div class="modal" style="width:360px">
+    <div class="modal-title">管理面板登录</div>
+    <div class="modal-body">
+      <div class="hint" style="margin:0 0 8px">当前监听地址已对外暴露，请输入管理员密码（config.json 的 <code>admin_password</code>）。</div>
+      <input id="adminLoginPass" class="input" type="password" placeholder="管理员密码" style="width:100%" autocomplete="current-password">
+      <div class="hint" id="adminLoginErr" style="color:var(--danger)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn small primary" id="btnAdminLogin">登录</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://registry.npmmirror.com/echarts/4.3.0/files/dist/echarts.min.js"></script>
 <script src="./app.js"></script>
 </body>
 </html>

@@ -15,7 +15,7 @@ import (
 )
 
 var (
-	user32 = windows.NewLazySystemDLL("user32.dll")
+	user32                   = windows.NewLazySystemDLL("user32.dll")
 	procSystemParametersInfo = user32.NewProc("SystemParametersInfoW")
 )
 
@@ -45,9 +45,11 @@ func msgBox(title, msg string, flags uintptr) uintptr {
 	proc := user32.NewProc("MessageBoxW")
 	caption, _ := syscall.UTF16PtrFromString(title)
 	text, _ := syscall.UTF16PtrFromString(msg)
-	// MB_TOPMOST(0x40000) + MB_SETFOREGROUND(0x10000) + MB_DEFAULT_DESKTOP_ONLY(0x20000)
-	// 强制主显示器前台显示，避免双显示器下弹窗位置飘忽
-	res, _, _ := proc.Call(0, uintptr(unsafe.Pointer(text)), uintptr(unsafe.Pointer(caption)), flags|0x40000|0x10000|0x20000)
+	// MB_TOPMOST(0x40000) + MB_SETFOREGROUND(0x10000)：置顶并抢前台。
+	// ⚠️ 不要加 MB_DEFAULT_DESKTOP_ONLY(0x20000)：那是「在缺省桌面窗口站上代建」的服务端语义，
+	// 不是定位开关 —— 实测弹窗会落到屏幕右下角、半屏在屏外，且在非缺省桌面下（锁屏 / RDP / UAC）
+	// 永不返回，调用它的那个 goroutine 会被永久阻塞（退出无反应 / 启动提示挡住托盘创建）。
+	res, _, _ := proc.Call(0, uintptr(unsafe.Pointer(text)), uintptr(unsafe.Pointer(caption)), flags|0x40000|0x10000)
 	return res
 }
 
@@ -197,4 +199,3 @@ func fileExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && !fi.IsDir()
 }
-

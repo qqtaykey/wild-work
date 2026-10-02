@@ -4,6 +4,7 @@
     "port": 7863
   },
   "api_key": "WildWorkAPI",
+  "admin_password": "",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
   "region": "cn",
@@ -15,9 +16,20 @@
   },
   "schedule": {
     "checkin_times": ["09:00", "21:00"],
-    "keepalive_hours": [22]
+    "keepalive_hours": [22],
+    "expiring_threshold_hours": 24
   },
   "upstream": {
     "timeout_seconds": 120
+  },
+  "compat": {
+    "default_channel": "workbuddy",
+    "max_tokens_cap": 32000,
+    "model_map": {
+      "claude-*": "workbuddy/glm-5.2",
+      "gpt-5*": "workbuddy/deepseek-v4-pro"
+    }
+  },
+  "proxies": {
   }
 }
